@@ -60,7 +60,10 @@ static GOptionEntry importone_options[] = {
   { NULL }
 };
 
+static gboolean opt_user_mode;
+
 static GOptionEntry checkout_options[] = {
+  { "user-mode", 'U', 0, G_OPTION_ARG_NONE, &opt_user_mode, "Do not change file ownership or initialize extended attributes", NULL },
   { NULL }
 };
 
@@ -125,6 +128,22 @@ common_init (struct DlayerOstree *self,
   ret = TRUE;
  out:
   return ret;
+}
+
+static GVariant *
+vardict_lookup_value_required (GVariantDict *dict,
+                               const char *key,
+                               const GVariantType *fmt,
+                               GError     **error)
+{
+  GVariant *r = g_variant_dict_lookup_value (dict, key, fmt);
+  if (!r)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                   "Failed to find metadata key %s (signature %s)", key, (char*)fmt);
+      return NULL;
+    }
+  return r;
 }
 
 static gboolean
@@ -230,12 +249,81 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
 }
 
 static gboolean
+resolve_layers (struct DlayerOstree *self,
+                const char          *layerid,
+                GPtrArray           *layer_ids,
+                GCancellable        *cancellable,
+                GError             **error)
+{
+  gboolean ret = FALSE;
+  g_autofree char *branch = NULL;
+  g_autofree char *rev = NULL;
+  g_autoptr(GVariant) commit = NULL;
+  g_autoptr(GVariant) commitmeta = NULL;
+  g_autoptr(GVariantDict) commitmeta_vdict = NULL;
+  g_autoptr(GVariant) layerv = NULL;
+  g_autoptr(GVariantDict) layer_vdict = NULL;
+  const guint maxlayers = 1024; /* Arbitrary */
+  const char *parent;
+
+  if (layer_ids->len >= maxlayers)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Layer maximum %u exceeded", maxlayers);
+      goto out;
+    }
+
+  if (g_cancellable_set_error_if_cancelled (cancellable,  error))
+    goto out;
+
+  branch = branch_name_for_docker_id (layerid);
+
+  if (!ostree_repo_resolve_rev (self->repo, branch, FALSE, &rev, error))
+    goto out;
+
+  if (!ostree_repo_load_variant (self->repo, OSTREE_OBJECT_TYPE_COMMIT, rev,
+                                 &commit, error))
+    goto out;
+
+  commitmeta = g_variant_get_child_value (commit, 0);
+  commitmeta_vdict = g_variant_dict_new (commitmeta);
+  layerv = vardict_lookup_value_required (commitmeta_vdict, "docker.layermeta", (GVariantType*)"a{sv}", error);
+  if (!layerv)
+    goto out;
+  layer_vdict = g_variant_dict_new (layerv);
+  if (!g_variant_dict_lookup (layer_vdict, "id", "&s", &layerid))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Missing required key 'id'");
+      goto out;
+    }
+
+  if (g_variant_dict_lookup (layer_vdict, "parent", "&s", &parent))
+    {
+      if (!resolve_layers (self, parent, layer_ids, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      g_ptr_array_add (layer_ids, g_steal_pointer (&rev));
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
 dlayer_ostree_builtin_checkout (struct DlayerOstree *self, int argc, char **argv, GCancellable *cancellable, GError **error)
 {
   gboolean ret = FALSE;
   GOptionContext *optcontext;
   const char *layerid;
   const char *destination;
+  g_autoptr(GPtrArray) layer_commits = g_ptr_array_new_with_free_func (g_free);
+  OstreeRepoCheckoutOptions ocheckout_options = { 0, };
+  glnx_fd_close int target_dfd = -1;
+  guint i;
   
   optcontext = g_option_context_new ("LAYERID DESTINATION - Check out a Docker layer (with all of its parents)");
 
@@ -259,6 +347,38 @@ dlayer_ostree_builtin_checkout (struct DlayerOstree *self, int argc, char **argv
 
   layerid = argv[1];
   destination = argv[2];
+
+  if (!resolve_layers (self, layerid, layer_commits, cancellable, error))
+    goto out;
+
+  g_assert (layer_commits->len > 0);
+  
+  ocheckout_options.overwrite_mode = OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES;
+  ocheckout_options.process_whiteouts = TRUE;
+
+  if (opt_user_mode)
+    ocheckout_options.mode = OSTREE_REPO_CHECKOUT_MODE_USER;
+
+  /* Check out the root, then open it */
+  if (!ostree_repo_checkout_tree_at (self->repo, &ocheckout_options,
+                                     AT_FDCWD, destination,
+                                     layer_commits->pdata[0],
+                                     cancellable, error))
+    goto out;
+
+  if (!glnx_opendirat (AT_FDCWD, destination, TRUE, &target_dfd, error))
+    goto out;
+
+  /* Now check out parent layers */
+  for (i = 1; i < layer_commits->len; i++)
+    {
+      const char *commitid = layer_commits->pdata[i];
+      if (!ostree_repo_checkout_tree_at (self->repo, &ocheckout_options,
+                                         target_dfd, ".",
+                                         commitid,
+                                         cancellable, error))
+        goto out;
+    }
 
   ret = TRUE;
  out:

@@ -22,4 +22,4 @@ bin_PROGRAMS += dlayer-ostree
 dlayer_ostree_SOURCES = src/dlayer-ostree.c
 
 dlayer_ostree_CFLAGS = $(AM_CFLAGS) $(BUILDDEP_DLAYEROSTREE_CFLAGS) -I$(srcdir)/src -I$(srcdir)/libglnx
-dlayer_ostree_LDADD = $(BUILDDEP_DLAYEROSTREE_LIBS)
+dlayer_ostree_LDADD = $(BUILDDEP_DLAYEROSTREE_LIBS) libglnx.la
