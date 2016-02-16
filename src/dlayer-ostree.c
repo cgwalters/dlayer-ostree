@@ -153,6 +153,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   GOptionContext *optcontext;
   const char *layerjson;
   const char *layerid;
+  const char *tarball = "-";
   g_autofree char *branch = NULL;
   g_autofree char *commit_checksum = NULL;
   glnx_unref_object JsonParser *parser = json_parser_new ();
@@ -162,7 +163,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   g_autoptr(GVariantDict) layer_variant_dict = NULL;
   g_autoptr(GVariant) metav = NULL;
 
-  optcontext = g_option_context_new ("LAYERJSON - Import a Docker image layer from stdin");
+  optcontext = g_option_context_new ("LAYERJSON TARBALL - Import a Docker image layer");
 
   if (!option_context_parse (optcontext, importone_options, &argc, &argv,
                              cancellable, error))
@@ -173,7 +174,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "A LAYERID argument is required");
       goto out;
     }
-  else if (argc > 2)
+  else if (argc > 3)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Too many arguments");
       goto out;
@@ -183,6 +184,13 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
     goto out;
 
   layerjson = argv[1];
+  if (argc == 2)
+    tarball = "/dev/fd/0";
+  else
+    {
+      g_assert (argc == 3);
+      tarball = argv[2];
+    }
 
   if (!json_parser_load_from_file (parser, layerjson, error))
     goto out;
@@ -220,7 +228,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   if (!ostree_repo_prepare_transaction (self->repo, NULL, cancellable, error))
     goto out;
 
-  { g_autoptr(GFile) stdin_file = g_file_new_for_path ("/dev/fd/0");
+  { g_autoptr(GFile) stdin_file = g_file_new_for_path (tarball);
     if (!ostree_repo_write_archive_to_mtree (self->repo, stdin_file, mtree,
                                              NULL, TRUE,
                                              cancellable, error))
