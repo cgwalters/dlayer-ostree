@@ -147,6 +147,37 @@ vardict_lookup_value_required (GVariantDict *dict,
 }
 
 static gboolean
+create_empty_default_dir (OstreeRepo  *repo,
+                          OstreeMutableTree *mtree,
+                          GCancellable *cancellable,
+                          GError **error)
+{
+  gboolean ret = FALSE;
+  g_autoptr(GVariant) dirmeta = NULL;
+  g_autoptr(GFileInfo) file_info = NULL;
+  g_autofree guchar *tmp_csum = NULL;
+  char checksum[65];
+
+  file_info = g_file_info_new ();
+  g_file_info_set_attribute_uint32 (file_info, "unix::uid", 0);
+  g_file_info_set_attribute_uint32 (file_info, "unix::gid", 0);
+  g_file_info_set_attribute_uint32 (file_info, "unix::mode", 0755 | S_IFDIR);
+
+  dirmeta = ostree_create_directory_metadata (file_info, NULL);
+
+  if (!ostree_repo_write_metadata (repo, OSTREE_OBJECT_TYPE_DIR_META, NULL,
+                                   dirmeta, &tmp_csum, cancellable, error))
+    goto out;
+
+  ostree_checksum_inplace_from_bytes (tmp_csum, checksum);
+  ostree_mutable_tree_set_metadata_checksum (mtree, checksum);
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
 dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **argv, GCancellable *cancellable, GError **error)
 {
   gboolean ret = FALSE;
@@ -234,6 +265,12 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
                                              cancellable, error))
     goto out;
   }
+
+  if (!ostree_mutable_tree_get_metadata_checksum (mtree))
+    {
+      if (!create_empty_default_dir (self->repo, mtree, cancellable, error))
+        goto out;
+    }
 
   if (!ostree_repo_write_mtree (self->repo, mtree, &root, cancellable, error))
     goto out;
