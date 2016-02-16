@@ -31,7 +31,7 @@ LT_INIT([disable-static])
 
 PKG_PROG_PKG_CONFIG
 PKG_CHECK_MODULES(BUILDDEP_GIO_UNIX, [gio-unix-2.0])
-PKG_CHECK_MODULES(BUILDDEP_DLAYEROSTREE, [ostree-1 json-glib-1.0])
+PKG_CHECK_MODULES(BUILDDEP_DLAYEROSTREE, [ostree-1 json-glib-1.0 libcurl])
 
 AC_CONFIG_FILES([
         Makefile

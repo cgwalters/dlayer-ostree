@@ -22,6 +22,8 @@
 
 #include <ostree.h>
 #include <json-glib/json-glib.h>
+#include <curl/curl.h>
+
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,7 @@ SUBCOMMANDPROTO(importone);
 SUBCOMMANDPROTO(checkout);
 
 static Subcommand commands[] = {
+  { "fetch", dlayer_ostree_builtin_fetch },
   { "importone", dlayer_ostree_builtin_importone },
   { "checkout", dlayer_ostree_builtin_checkout },
   { NULL, NULL }
@@ -53,6 +56,10 @@ static char *opt_repo;
 static GOptionEntry global_entries[] = {
   { "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print version information and exit", NULL },
   { "repo", 0, 0, G_OPTION_ARG_STRING, &opt_repo, "Path to OSTree repository", "PATH" },
+  { NULL }
+};
+
+static GOptionEntry fetch_options[] = {
   { NULL }
 };
 
@@ -248,6 +255,135 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   return ret;
 }
 
+static gboolean
+dlayer_ostree_builtin_fetch (struct DlayerOstree *self, int argc, char **argv, GCancellable *cancellable, GError **error)
+{
+  gboolean ret = FALSE;
+  GOptionContext *optcontext;
+  const char *layerjson;
+  const char *host_and_image;
+  const char *slash;
+  const char *colon;
+  const char *imagename;
+  const char *tag;
+  const char *host;
+  g_autofree char *url = NULL;
+  CURL *c;
+  int r;
+
+  optcontext = g_option_context_new ("IMAGE - Download and import a Docker image");
+
+  if (!option_context_parse (optcontext, importone_options, &argc, &argv,
+                             cancellable, error))
+    goto out;
+
+  if (argc < 2)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "An IMAGE argument is required");
+      goto out;
+    }
+  else if (argc > 2)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Too many arguments");
+      goto out;
+    }
+
+  if (!common_init (self, error))
+    goto out;
+
+  host_and_image = argv[1];
+
+  slash = strchr (host_and_image, '/');
+  if (!slash)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid imagename '%s', expecting HOST/IMAGE", host_and_image);
+    }
+  host = strndupa (host_and_image, slash - host_and_image);
+  imagename = slash + 1;
+
+  colon = strchr (imagename, ':');
+  if (!colon)
+    tag = "latest";
+  else
+    {
+      tag = colon + 1;
+      imagename = strndupa (imagename, colon - imagename);
+    }
+
+  c = curl_easy_init();
+  g_assert (c);
+
+  url = g_strdup_printf ("https://%s/v1/repositories/%s/images", host, imagename);
+  curl_easy_setopt (c, CURLOPT_URL, http);
+
+  { struct curl_slist *headers = NULL;
+    headers = curl_slist_append (headers, "X-Docker-Token: true");
+    curl
+
+  if (!json_parser_load_from_file (parser, layerjson, error))
+    goto out;
+
+  layer_variant = g_variant_ref_sink (json_gvariant_deserialize (json_parser_get_root (parser), NULL, error));
+  if (!layer_variant)
+    {
+      g_prefix_error (error, "Converting layer JSON to GVariant: "); 
+      goto out;
+    }
+  if (!g_variant_is_of_type (layer_variant, (GVariantType*)"a{sv}"))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid non-object layer JSON");
+      goto out;
+    }
+
+  layer_variant_dict = g_variant_dict_new (layer_variant);
+  if (!g_variant_dict_lookup (layer_variant_dict, "id", "&s", &layerid))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Missing required key 'id'");
+      goto out;
+    }
+
+  branch = branch_name_for_docker_id (layerid);
+
+  { g_autoptr(GVariantBuilder) metabuilder = g_variant_builder_new (G_VARIANT_TYPE ("a{sv}"));
+    g_variant_builder_add (metabuilder, "{sv}", "docker.layermeta", layer_variant);
+    metav = g_variant_ref_sink (g_variant_builder_end (metabuilder));
+  }
+
+  mtree = ostree_mutable_tree_new ();
+
+  if (!ostree_repo_prepare_transaction (self->repo, NULL, cancellable, error))
+    goto out;
+
+  { g_autoptr(GFile) stdin_file = g_file_new_for_path ("/dev/fd/0");
+    if (!ostree_repo_write_archive_to_mtree (self->repo, stdin_file, mtree,
+                                             NULL, TRUE,
+                                             cancellable, error))
+    goto out;
+  }
+
+  if (!ostree_repo_write_mtree (self->repo, mtree, &root, cancellable, error))
+    goto out;
+
+  { /* TODO: Parse the layerid creation timestamp */
+
+    if (!ostree_repo_write_commit (self->repo, NULL, "", NULL, metav,
+                                   OSTREE_REPO_FILE (root),
+                                   &commit_checksum, cancellable, error))
+      goto out;
+  }
+
+  ostree_repo_transaction_set_ref (self->repo, NULL, branch, commit_checksum);
+  
+  if (!ostree_repo_commit_transaction (self->repo, NULL, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  return ret;
+}
 static gboolean
 resolve_layers (struct DlayerOstree *self,
                 const char          *layerid,
@@ -509,8 +645,10 @@ main (int    argc,
   struct DlayerOstree self = { NULL, };
   
   /* avoid gvfs (http://bugzilla.gnome.org/show_bug.cgi?id=526454) */
-  g_setenv ("GIO_USE_VFS", "local", TRUE);
 
+ g_setenv ("GIO_USE_VFS", "local", TRUE);
+ curl_global_init(CURL_GLOBAL_ALL);
+ 
   if (!submain (&self, argc, argv, cancellable, error))
     goto out;
 
