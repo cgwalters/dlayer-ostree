@@ -56,7 +56,10 @@ static GOptionEntry global_entries[] = {
   { NULL }
 };
 
+static char *opt_branch;
+
 static GOptionEntry importone_options[] = {
+  { "branch", 0, 0, G_OPTION_ARG_STRING, &opt_branch, "Update this branch to point to the layer", "PATH" },
   { NULL }
 };
 
@@ -284,7 +287,10 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   }
 
   ostree_repo_transaction_set_ref (self->repo, NULL, branch, commit_checksum);
-  
+
+  if (opt_branch)
+    ostree_repo_transaction_set_ref (self->repo, NULL, opt_branch, commit_checksum);
+
   if (!ostree_repo_commit_transaction (self->repo, NULL, cancellable, error))
     goto out;
 
@@ -301,7 +307,6 @@ resolve_layers (struct DlayerOstree *self,
                 GError             **error)
 {
   gboolean ret = FALSE;
-  g_autofree char *branch = NULL;
   g_autofree char *rev = NULL;
   g_autoptr(GVariant) commit = NULL;
   g_autoptr(GVariant) commitmeta = NULL;
@@ -321,9 +326,7 @@ resolve_layers (struct DlayerOstree *self,
   if (g_cancellable_set_error_if_cancelled (cancellable,  error))
     goto out;
 
-  branch = branch_name_for_docker_id (layerid);
-
-  if (!ostree_repo_resolve_rev (self->repo, branch, FALSE, &rev, error))
+  if (!ostree_repo_resolve_rev (self->repo, layerid, FALSE, &rev, error))
     goto out;
 
   if (!ostree_repo_load_variant (self->repo, OSTREE_OBJECT_TYPE_COMMIT, rev,
@@ -345,7 +348,11 @@ resolve_layers (struct DlayerOstree *self,
 
   if (g_variant_dict_lookup (layer_vdict, "parent", "&s", &parent))
     {
-      if (!resolve_layers (self, parent, layer_ids, cancellable, error))
+      g_autofree char *branch = NULL;
+
+      branch = branch_name_for_docker_id (layerid);
+
+      if (!resolve_layers (self, branch, layer_ids, cancellable, error))
         goto out;
     }
   else
