@@ -351,7 +351,7 @@ resolve_layers (struct DlayerOstree *self,
     {
       g_autofree char *branch = NULL;
 
-      branch = branch_name_for_docker_id (layerid);
+      branch = branch_name_for_docker_id (parent);
 
       if (!resolve_layers (self, branch, recursion + 1, layer_ids, cancellable, error))
         goto out;
