@@ -302,6 +302,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
 static gboolean
 resolve_layers (struct DlayerOstree *self,
                 const char          *layerid,
+                guint                recursion,
                 GPtrArray           *layer_ids,
                 GCancellable        *cancellable,
                 GError             **error)
@@ -316,7 +317,7 @@ resolve_layers (struct DlayerOstree *self,
   const guint maxlayers = 1024; /* Arbitrary */
   const char *parent;
 
-  if (layer_ids->len >= maxlayers)
+  if (recursion >= maxlayers)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Layer maximum %u exceeded", maxlayers);
@@ -352,7 +353,7 @@ resolve_layers (struct DlayerOstree *self,
 
       branch = branch_name_for_docker_id (layerid);
 
-      if (!resolve_layers (self, branch, layer_ids, cancellable, error))
+      if (!resolve_layers (self, branch, recursion + 1, layer_ids, cancellable, error))
         goto out;
     }
   else
@@ -400,7 +401,7 @@ dlayer_ostree_builtin_checkout (struct DlayerOstree *self, int argc, char **argv
   layerid = argv[1];
   destination = argv[2];
 
-  if (!resolve_layers (self, layerid, layer_commits, cancellable, error))
+  if (!resolve_layers (self, layerid, 0, layer_commits, cancellable, error))
     goto out;
 
   g_assert (layer_commits->len > 0);
