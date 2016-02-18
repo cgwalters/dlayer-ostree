@@ -133,22 +133,6 @@ common_init (struct DlayerOstree *self,
   return ret;
 }
 
-static GVariant *
-vardict_lookup_value_required (GVariantDict *dict,
-                               const char *key,
-                               const GVariantType *fmt,
-                               GError     **error)
-{
-  GVariant *r = g_variant_dict_lookup_value (dict, key, fmt);
-  if (!r)
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                   "Failed to find metadata key %s (signature %s)", key, (char*)fmt);
-      return NULL;
-    }
-  return r;
-}
-
 static gboolean
 create_empty_default_dir (OstreeRepo  *repo,
                           OstreeMutableTree *mtree,
@@ -188,6 +172,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   const char *layerjson;
   const char *layerid;
   const char *tarball = "-";
+  g_autofree char *layer_string = NULL;
   g_autofree char *branch = NULL;
   g_autofree char *commit_checksum = NULL;
   glnx_unref_object JsonParser *parser = json_parser_new ();
@@ -226,7 +211,10 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
       tarball = argv[2];
     }
 
-  if (!json_parser_load_from_file (parser, layerjson, error))
+  if (!g_file_get_contents (layerjson, &layer_string, NULL, error))
+    goto out;
+
+  if (!json_parser_load_from_data (parser, layer_string, -1, error))
     goto out;
 
   layer_variant = g_variant_ref_sink (json_gvariant_deserialize (json_parser_get_root (parser), NULL, error));
@@ -253,7 +241,7 @@ dlayer_ostree_builtin_importone (struct DlayerOstree *self, int argc, char **arg
   branch = branch_name_for_docker_id (layerid);
 
   { g_autoptr(GVariantBuilder) metabuilder = g_variant_builder_new (G_VARIANT_TYPE ("a{sv}"));
-    g_variant_builder_add (metabuilder, "{sv}", "docker.layermeta", layer_variant);
+    g_variant_builder_add (metabuilder, "{sv}", "docker.layer", g_variant_new_string (layer_string));
     metav = g_variant_ref_sink (g_variant_builder_end (metabuilder));
   }
 
@@ -312,10 +300,14 @@ resolve_layers (struct DlayerOstree *self,
   g_autoptr(GVariant) commit = NULL;
   g_autoptr(GVariant) commitmeta = NULL;
   g_autoptr(GVariantDict) commitmeta_vdict = NULL;
+  glnx_unref_object JsonParser *parser = json_parser_new ();
+  JsonNode *layer_root;
+  JsonObject *layer_root_o;
+  JsonNode *layer_parent;
+  const char *layer_string;
   g_autoptr(GVariant) layerv = NULL;
   g_autoptr(GVariantDict) layer_vdict = NULL;
   const guint maxlayers = 1024; /* Arbitrary */
-  const char *parent;
 
   if (recursion >= maxlayers)
     {
@@ -336,20 +328,37 @@ resolve_layers (struct DlayerOstree *self,
 
   commitmeta = g_variant_get_child_value (commit, 0);
   commitmeta_vdict = g_variant_dict_new (commitmeta);
-  layerv = vardict_lookup_value_required (commitmeta_vdict, "docker.layermeta", (GVariantType*)"a{sv}", error);
-  if (!layerv)
-    goto out;
-  layer_vdict = g_variant_dict_new (layerv);
-  if (!g_variant_dict_lookup (layer_vdict, "id", "&s", &layerid))
+  if (!g_variant_dict_lookup (commitmeta_vdict, "docker.layer", "&s", &layer_string, error))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "Missing required key 'id'");
+                           "Missing required key 'docker.layer'");
       goto out;
     }
 
-  if (g_variant_dict_lookup (layer_vdict, "parent", "&s", &parent))
+  if (!json_parser_load_from_data (parser, layer_string, -1, error))
+    goto out;
+
+  layer_root = json_parser_get_root (parser);
+  if (json_node_get_node_type (layer_root) != JSON_NODE_OBJECT)
     {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Invalid 'docker.layer'");
+      goto out;
+    }
+  layer_root_o = json_node_get_object (layer_root);
+
+  layer_parent = json_object_get_member (layer_root_o, "parent");
+  if (layer_parent)
+    {
+      const char *parent = json_node_get_string (layer_parent);
       g_autofree char *branch = NULL;
+
+      if (!parent)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Invalid 'docker.layer'");
+          goto out;
+        }
 
       branch = branch_name_for_docker_id (parent);
 
